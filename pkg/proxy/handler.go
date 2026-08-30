@@ -42,7 +42,7 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	upStreamReq, err := http.NewRequest("POST", p.OllamaURL, bytes.NewBuffer(payloadBytes))
+	upStreamReq, err := http.NewRequestWithContext(r.Context(), "POST", p.OllamaURL, bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		http.Error(w, "Failed to create upstream Request", http.StatusInternalServerError)
 		return
@@ -54,6 +54,7 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Failed to execute upstream Request", http.StatusInternalServerError)
 		return
 	}
+
 	defer upStreamResp.Body.Close()
 	for key, values := range upStreamResp.Header {
 		for _, value := range values {
@@ -62,6 +63,24 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 	}
 	status := upStreamResp.StatusCode
 	w.WriteHeader(status)
-	io.Copy(w, upStreamResp.Body)
+	rc := http.NewResponseController(w)
+	buf := make([]byte, 1024)
+	for {
+		n, err := upStreamResp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				break
+			}
+			if flushErr := rc.Flush(); flushErr != nil {
+				break
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				fmt.Printf("Upstream stream interrupted: %v\n", err)
+			}
+			break
+		}
 
+	}
 }

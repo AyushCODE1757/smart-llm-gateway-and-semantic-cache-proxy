@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"llm-gateway/pkg/cache"
 	"llm-gateway/pkg/types"
 	"net/http"
 )
@@ -12,11 +13,12 @@ import (
 // GateWayProxy holds config for our route
 type GateWayProxy struct {
 	OllamaURL string
+	Cache     cache.SemanticCache
 }
 
 // NewGateWayProxy Initializes the GateWayProxy
-func NewGateWayProxy(url string) *GateWayProxy {
-	return &GateWayProxy{OllamaURL: url}
+func NewGateWayProxy(url string, cache cache.SemanticCache) *GateWayProxy {
+	return &GateWayProxy{OllamaURL: url, Cache: cache}
 }
 
 func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request) {

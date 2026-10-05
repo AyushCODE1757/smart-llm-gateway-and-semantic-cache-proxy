@@ -7,10 +7,10 @@ import (
 	"github.com/qdrant/go-client/qdrant"
 )
 
-func NewQDrantClient(host string) (*qdrant.Client, error) {
+func NewQDrantClient(host string, port int) (*qdrant.Client, error) {
 	client, err := qdrant.NewClient(&qdrant.Config{
 		Host:   host,
-		Port:   6334,
+		Port:   port,
 		APIKey: "",
 		UseTLS: false,
 	})
@@ -31,6 +31,64 @@ type QdrantCache struct {
 	client         *qdrant.Client
 	collectionName string
 	threshold      float32
+}
+
+func NewQdrantCache(
+	host string,
+	port int,
+	collectionName string,
+	threshold float32,
+) (*QdrantCache, error) {
+	client, err := NewQDrantClient(host, port)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Qdrant client: %w", err)
+	}
+
+	return &QdrantCache{
+		client:         client,
+		collectionName: collectionName,
+		threshold:      threshold,
+	}, nil
+}
+
+func (q *QdrantCache) InitCollection(ctx context.Context) error {
+	exists, err := q.client.CollectionExists(ctx, q.collectionName)
+	if err != nil {
+		return fmt.Errorf("failed to check collection existence: %w", err)
+	}
+
+	if exists {
+		fmt.Printf("Collection '%s' already exists.\n", q.collectionName)
+		return nil
+	}
+
+	err = q.client.CreateCollection(ctx, &qdrant.CreateCollection{
+		CollectionName: q.collectionName,
+		VectorsConfig: qdrant.NewVectorsConfig(
+			&qdrant.VectorParams{
+				Size:     768,
+				Distance: qdrant.Distance_Cosine,
+			},
+		),
+	})
+	if err != nil {
+		return fmt.Errorf(
+			"failed to create collection %s: %w",
+			q.collectionName,
+			err,
+		)
+	}
+
+	fmt.Printf(
+		"Collection %s created successfully!\n",
+		q.collectionName,
+	)
+
+	return nil
+}
+
+func (q *QdrantCache) Close() error {
+	return q.client.Close()
 }
 
 func (q *QdrantCache) SimilaritySearch(ctx context.Context, embedding []float32) (*SimilaritySearchResult, error) {

@@ -8,16 +8,17 @@ import (
 	"llm-gateway/pkg/cache"
 	"llm-gateway/pkg/types"
 	"net/http"
+	"time"
 )
 
 // GateWayProxy holds config for our route
 type GateWayProxy struct {
 	OllamaURL string
-	Cache     cache.SemanticCache
+	Cache     *cache.TwoTierCache
 }
 
 // NewGateWayProxy Initializes the GateWayProxy
-func NewGateWayProxy(url string, cache cache.SemanticCache) *GateWayProxy {
+func NewGateWayProxy(url string, cache *cache.TwoTierCache) *GateWayProxy {
 	return &GateWayProxy{OllamaURL: url, Cache: cache}
 }
 
@@ -29,6 +30,37 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 	var reqBody types.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
 		http.Error(w, "Error while Parsing the request", http.StatusBadRequest)
+		return
+	}
+	cachePrompt := cache.BuildCachePrompt(reqBody)
+	cacheKey := cache.GenerateCacheKey(cachePrompt)
+	cacheResult, err := p.Cache.GetCachedResponse(r.Context(), cacheKey, cachePrompt)
+	if err != nil {
+		http.Error(w, "Cache lookup failed", http.StatusInternalServerError)
+		return
+	}
+	if cacheResult.Hit {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		response := types.ChatCompletionResponse{
+			Id:      "cache-hit",
+			Object:  "chat.completion",
+			Created: time.Now().Unix(),
+			Model:   reqBody.Model,
+			Choices: []types.ChatCompletionChoice{
+				{
+					Index: 0,
+					Message: types.ChatMessage{
+						Role:    "assistant",
+						Content: cacheResult.Value,
+					},
+					FinishReason: "stop",
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			return
+		}
 		return
 	}
 	defer func(Body io.ReadCloser) {

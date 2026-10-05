@@ -14,7 +14,7 @@ func createTestTwoTierCache(t *testing.T) (*TwoTierCache, *RedisCache) {
 		time.Minute,
 	)
 
-	qdrantClient, err := NewQDrantClient("localhost")
+	qdrantClient, err := NewQDrantClient("localhost", 6334)
 	if err != nil {
 		redisCache.Close()
 		t.Fatalf("failed to create Qdrant client: %v", err)

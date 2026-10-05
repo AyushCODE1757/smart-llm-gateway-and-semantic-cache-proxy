@@ -8,16 +8,17 @@ import (
 func TestSemanticSearch(t *testing.T) {
 	ctx := context.Background()
 
-	client, err := NewQDrantClient("localhost")
+	cache, err := NewQdrantCache(
+		"localhost",
+		6334,
+		"llm_prompts",
+		0.90,
+	)
 	if err != nil {
-		t.Fatalf("failed to create Qdrant client: %v", err)
+		t.Fatalf("failed to create Qdrant cache: %v", err)
 	}
 
-	cache := &QdrantCache{
-		client:         client,
-		collectionName: "llm_prompts",
-		threshold:      0.90,
-	}
+	defer cache.Close()
 
 	// Create embedding for the cached prompt.
 	storedEmbedding, err := GetOllamaEmbedding(
@@ -39,10 +40,10 @@ func TestSemanticSearch(t *testing.T) {
 		t.Fatalf("failed to insert test point: %v", err)
 	}
 
-	// Generate embedding for semantically similar query.
+	// Generate embedding for a semantically similar query.
 	queryEmbedding, err := GetOllamaEmbedding(
 		"http://localhost:11434",
-		"What is the population of Mars?",
+		"Which city is the capital of Japan?",
 	)
 	if err != nil {
 		t.Fatalf("failed to generate query embedding: %v", err)
@@ -56,6 +57,20 @@ func TestSemanticSearch(t *testing.T) {
 
 	if result == nil {
 		t.Fatal("expected semantic cache HIT, got MISS")
+	}
+
+	if result.Score < 0.90 {
+		t.Fatalf(
+			"expected similarity score >= 0.90, got %f",
+			result.Score,
+		)
+	}
+
+	if result.Value != "The capital of Japan is Tokyo." {
+		t.Fatalf(
+			"unexpected cached value: %s",
+			result.Value,
+		)
 	}
 
 	t.Logf("Semantic HIT")

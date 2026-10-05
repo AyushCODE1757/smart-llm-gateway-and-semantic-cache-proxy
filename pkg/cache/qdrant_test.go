@@ -30,7 +30,7 @@ func TestSemanticSearch(t *testing.T) {
 	}
 
 	// Insert test cache entry.
-	err = cache.AddTestPoint(
+	err = cache.AddPoint(
 		ctx,
 		1,
 		storedEmbedding,

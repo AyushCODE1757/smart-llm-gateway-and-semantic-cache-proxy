@@ -124,7 +124,7 @@ func (q *QdrantCache) SimilaritySearch(ctx context.Context, embedding []float32)
 	}, nil
 }
 
-func (q *QdrantCache) AddTestPoint(
+func (q *QdrantCache) AddPoint(
 	ctx context.Context,
 	id uint64,
 	embedding []float32,
@@ -144,7 +144,7 @@ func (q *QdrantCache) AddTestPoint(
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to insert test point: %w", err)
+		return fmt.Errorf("failed to insert cache point: %w", err)
 	}
 
 	return nil

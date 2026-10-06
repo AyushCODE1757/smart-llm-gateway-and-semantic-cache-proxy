@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"llm-gateway/pkg/cache"
@@ -58,32 +61,23 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if cacheResult.Hit {
-
-		w.Header().Set("Content-Type", "application/json")
-
-		response := types.ChatCompletionResponse{
-			Id:      "cache-hit",
-			Object:  "chat.completion",
-			Created: time.Now().Unix(),
-			Model:   reqBody.Model,
-			Choices: []types.ChatCompletionChoice{
-				{
-					Index: 0,
-					Message: types.ChatMessage{
-						Role:    "assistant",
-						Content: cacheResult.Value,
-					},
-					FinishReason: "stop",
-				},
-			},
+		fmt.Printf(
+			"Cache HIT | Source: %s\n",
+			cacheResult.Source,
+		)
+		if reqBody.Stream {
+			p.streamCachedResponse(
+				w,
+				reqBody.Model,
+				cacheResult.Value,
+			)
+			return
 		}
-
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			fmt.Printf("Failed to encode cache response: %v\n", err)
-		}
-
+		p.writeCachedResponse(w, reqBody.Model, cacheResult.Value)
 		return
 	}
+
+	fmt.Println("Cache MISS | Forwarding request to Ollama")
 	payloadBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		http.Error(
@@ -125,7 +119,295 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 	}
 
 	defer upstreamResp.Body.Close()
+	if reqBody.Stream {
+		p.handleStreamingMiss(
+			w,
+			r,
+			upstreamResp,
+			cacheKey,
+			cachePrompt,
+			reqBody.Model,
+		)
+		return
+	}
+	p.handleNonStreamingMiss(
+		w,
+		r,
+		upstreamResp,
+		cacheKey,
+		cachePrompt,
+	)
+}
 
+// Cache Hit Non-Streaming
+
+func (p *GateWayProxy) writeCachedResponse(w http.ResponseWriter, model string, value string) {
+	w.Header().Set("Content-Type", "application/json")
+	response := types.ChatCompletionResponse{
+		Id:      "cache-hit",
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []types.ChatCompletionChoice{
+			{
+				Index: 0,
+				Message: types.ChatMessage{
+					Role:    "assistant",
+					Content: value,
+				},
+				FinishReason: "stop",
+			},
+		},
+		Usage: types.UsageMetrics{},
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Printf(
+			"Failed to encode cache response: %v\n",
+			err,
+		)
+	}
+
+}
+
+// Cache Hit Streaming
+func (p *GateWayProxy) streamCachedResponse(w http.ResponseWriter, model string, value string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	rc := http.NewResponseController(w)
+
+	role := "assistant"
+	firstChunk := types.ChatCompletionStreamResponse{
+		ID:      "cache-hit",
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []types.ChatCompletionStreamChoice{
+			{
+				Index: 0,
+				Delta: types.ChatDelta{
+					Role: role,
+				},
+				FinishReason: nil,
+			},
+		},
+	}
+	p.writeSSEChunk(w, rc, firstChunk)
+	contentChunk := types.ChatCompletionStreamResponse{
+		ID:      "cache-hit",
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []types.ChatCompletionStreamChoice{
+			{
+				Index: 0,
+				Delta: types.ChatDelta{
+					Content: value,
+				},
+				FinishReason: nil,
+			},
+		},
+	}
+	p.writeSSEChunk(w, rc, contentChunk)
+	finishReason := "stop"
+	finalChunk := types.ChatCompletionStreamResponse{
+		ID:      "cache-hit",
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Model:   model,
+		Choices: []types.ChatCompletionStreamChoice{
+			{
+				Index: 0,
+				Delta: types.ChatDelta{
+					Role: role,
+				},
+				FinishReason: &finishReason,
+			},
+		},
+	}
+	p.writeSSEChunk(w, rc, finalChunk)
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	_ = rc.Flush()
+}
+
+// Cache Miss 	Streaming
+
+func (p *GateWayProxy) handleStreamingMiss(
+	w http.ResponseWriter,
+	r *http.Request,
+	upstreamResp *http.Response,
+	cacheKey string,
+	cachePrompt string,
+	model string) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	rc := http.NewResponseController(w)
+
+	scanner := bufio.NewScanner(upstreamResp.Body)
+	scanner.Buffer(
+		make([]byte, 4096),
+		1024*1024,
+	)
+	var responseBuilder strings.Builder
+	for scanner.Scan() {
+		line := scanner.Text()
+		fmt.Printf("RAW UPSTREAM LINE: %q\n", line)
+		if line == "" {
+			continue
+		}
+		line = strings.TrimPrefix(line, "data: ")
+		if line == "[DONE]" {
+			break
+		}
+		var ollamaChunk struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			Model   string `json:"model"`
+
+			Choices []struct {
+				Index int `json:"index"`
+
+				Delta struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"delta"`
+
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(
+			[]byte(line),
+			&ollamaChunk,
+		); err != nil {
+			fmt.Printf(
+				"Failed to parse Ollama stream chunk: %v\n",
+				err,
+			)
+			continue
+		}
+		if len(ollamaChunk.Choices) == 0 {
+			continue
+		}
+
+		content := ollamaChunk.Choices[0].Delta.Content
+		if content != "" {
+			responseBuilder.WriteString(content)
+			streamChunk := types.ChatCompletionStreamResponse{
+				ID:      "chatcmpl-stream",
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   model,
+				Choices: []types.ChatCompletionStreamChoice{
+					{
+						Index: 0,
+						Delta: types.ChatDelta{
+							Content: content,
+						},
+					},
+				},
+			}
+			if err := p.writeSSEChunk(w, rc, streamChunk); err != nil {
+				fmt.Printf(
+					"Failed to stream chunk to client: %v\n",
+					err,
+				)
+				return
+			}
+
+		}
+
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("Upstream stream interrupted: %v\n", err)
+		return
+	}
+	finishReason := "stop"
+	finalChunk := types.ChatCompletionStreamResponse{
+		ID:      "chatcmpl-stream",
+		Object:  "chat.completion.chunk",
+		Created: time.Now().Unix(),
+		Choices: []types.ChatCompletionStreamChoice{
+			{
+				Index:        0,
+				Delta:        types.ChatDelta{},
+				FinishReason: &finishReason,
+			},
+		},
+	}
+	if err := p.writeSSEChunk(
+		w,
+		rc,
+		finalChunk,
+	); err != nil {
+		return
+	}
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	_ = rc.Flush()
+
+	assistantResponse := responseBuilder.String()
+	if assistantResponse == "" {
+		fmt.Println(
+			"Empty assistant response; skipping cache",
+		)
+		return
+	}
+	cacheKeyCopy := cacheKey
+	cachePromptCopy := cachePrompt
+	responseCopy := assistantResponse
+
+	go func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer cancel()
+		err := p.Cache.SetCachedResponse(ctx, cacheKeyCopy, cachePromptCopy, responseCopy)
+		if err != nil {
+			fmt.Printf(
+				"Async cache failed: %v\n",
+				err,
+			)
+			return
+		}
+		fmt.Printf(
+			"Async cache populated | Key: %s\n",
+			cacheKeyCopy,
+		)
+	}()
+
+}
+
+// SSE Writer
+func (p *GateWayProxy) writeSSEChunk(
+	w http.ResponseWriter,
+	rc *http.ResponseController,
+	chunk types.ChatCompletionStreamResponse,
+) error {
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(
+		w,
+		"data: %s\n\n",
+		data,
+	); err != nil {
+		return err
+	}
+	return rc.Flush()
+}
+
+// Non Streaming miss
+func (p *GateWayProxy) handleNonStreamingMiss(
+	w http.ResponseWriter,
+	r *http.Request,
+	upstreamResp *http.Response,
+	cacheKey string,
+	cachePrompt string,
+) {
 	responseBody, err := io.ReadAll(upstreamResp.Body)
 	if err != nil {
 		http.Error(
@@ -135,23 +417,12 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 		)
 		return
 	}
-
-	// --------------------------------------------------
-	// 8. Forward upstream headers
-	// --------------------------------------------------
-
 	for key, values := range upstreamResp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
-
-	// --------------------------------------------------
-	// 9. Forward response to client
-	// --------------------------------------------------
-
 	w.WriteHeader(upstreamResp.StatusCode)
-
 	if _, err := w.Write(responseBody); err != nil {
 		fmt.Printf(
 			"Failed to write upstream response: %v\n",
@@ -159,11 +430,6 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 		)
 		return
 	}
-
-	// --------------------------------------------------
-	// 10. Parse response for caching
-	// --------------------------------------------------
-
 	var upstreamResponse types.ChatCompletionResponse
 
 	if err := json.Unmarshal(responseBody, &upstreamResponse); err != nil {
@@ -173,42 +439,40 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 		)
 		return
 	}
-
 	if len(upstreamResponse.Choices) == 0 {
 		fmt.Println(
 			"Upstream response contains no choices; skipping cache",
 		)
 		return
 	}
-
 	assistantResponse := upstreamResponse.Choices[0].Message.Content
-
 	if assistantResponse == "" {
-		fmt.Println(
-			"Empty assistant response; skipping cache",
-		)
+		fmt.Println("Empty assistant response; skipping cache")
 		return
 	}
-
-	// --------------------------------------------------
-	// 11. Populate Redis + Qdrant
-	// --------------------------------------------------
-
-	if err := p.Cache.SetCachedResponse(
-		r.Context(),
-		cacheKey,
-		cachePrompt,
-		assistantResponse,
-	); err != nil {
+	go func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			10*time.Second,
+		)
+		defer cancel()
+		if err := p.Cache.SetCachedResponse(
+			ctx,
+			cacheKey,
+			cachePrompt,
+			assistantResponse,
+		); err != nil {
+			fmt.Printf(
+				"Async cache population failed: %v\n",
+				err,
+			)
+			return
+		}
 		fmt.Printf(
-			"Failed to populate cache: %v\n",
-			err,
+			"Async cache populated | Key: %s\n",
+			cacheKey,
 		)
-		return
-	}
 
-	fmt.Printf(
-		"Cache populated | Key: %s\n",
-		cacheKey,
-	)
+	}()
+
 }

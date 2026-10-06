@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"llm-gateway/pkg/cache"
 	"llm-gateway/pkg/proxy"
+	"llm-gateway/pkg/telemetry"
 	"log"
 	"net/http"
 	"time"
@@ -33,8 +34,12 @@ func main() {
 	// 4. Two Tier Cache
 	twoTierCache := cache.NewTwoTierCache(redisCache, qdrantCache, "http://localhost:11434")
 
-	// 5. Gateway Proxy
-	gatewayProxy := proxy.NewGateWayProxy("http://localhost:11434/v1/chat/completions", twoTierCache)
+	// 5. Initialize Metrics Channel
+
+	metrics := telemetry.NewMetricsChannel(1000)
+
+	// 6. Gateway Proxy
+	gatewayProxy := proxy.NewGateWayProxy("http://localhost:11434/v1/chat/completions", twoTierCache, metrics)
 
 	// 6. Http Route
 	http.HandleFunc(

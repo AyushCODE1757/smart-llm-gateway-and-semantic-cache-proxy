@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"llm-gateway/pkg/cache"
+	"llm-gateway/pkg/telemetry"
 	"llm-gateway/pkg/types"
 )
 
@@ -19,13 +20,18 @@ import (
 type GateWayProxy struct {
 	OllamaURL string
 	Cache     *cache.TwoTierCache
+	Metrics   *telemetry.MetricsChannel
 }
 
 // NewGateWayProxy initializes the GateWayProxy.
-func NewGateWayProxy(url string, cache *cache.TwoTierCache) *GateWayProxy {
+func NewGateWayProxy(
+	url string,
+	cache *cache.TwoTierCache,
+	metricChannel *telemetry.MetricsChannel) *GateWayProxy {
 	return &GateWayProxy{
 		OllamaURL: url,
 		Cache:     cache,
+		Metrics:   metricChannel,
 	}
 }
 
@@ -34,6 +40,7 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	requestStart := time.Now()
 	var reqBody types.ChatCompletionRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
@@ -122,11 +129,11 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 	if reqBody.Stream {
 		p.handleStreamingMiss(
 			w,
-			r,
 			upstreamResp,
 			cacheKey,
 			cachePrompt,
 			reqBody.Model,
+			requestStart,
 		)
 		return
 	}
@@ -234,11 +241,11 @@ func (p *GateWayProxy) streamCachedResponse(w http.ResponseWriter, model string,
 
 func (p *GateWayProxy) handleStreamingMiss(
 	w http.ResponseWriter,
-	r *http.Request,
 	upstreamResp *http.Response,
 	cacheKey string,
 	cachePrompt string,
-	model string) {
+	model string,
+	requestStart time.Time) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -251,6 +258,8 @@ func (p *GateWayProxy) handleStreamingMiss(
 		1024*1024,
 	)
 	var responseBuilder strings.Builder
+	var ttft time.Duration
+	var firstTokenReceived bool
 	for scanner.Scan() {
 		line := scanner.Text()
 		fmt.Printf("RAW UPSTREAM LINE: %q\n", line)
@@ -294,6 +303,10 @@ func (p *GateWayProxy) handleStreamingMiss(
 
 		content := ollamaChunk.Choices[0].Delta.Content
 		if content != "" {
+			if !firstTokenReceived {
+				ttft = time.Since(requestStart)
+				firstTokenReceived = true
+			}
 			responseBuilder.WriteString(content)
 			streamChunk := types.ChatCompletionStreamResponse{
 				ID:      "chatcmpl-stream",
@@ -320,6 +333,16 @@ func (p *GateWayProxy) handleStreamingMiss(
 		}
 
 	}
+	totalLatency := time.Since(requestStart)
+	event := telemetry.MetricEvent{
+		Model:        model,
+		CacheStatus:  "miss",
+		CacheSource:  "none",
+		TTFT:         ttft,
+		TotalLatency: totalLatency,
+		CreatedAt:    time.Now(),
+	}
+	p.Metrics.Publish(event)
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("Upstream stream interrupted: %v\n", err)
 		return

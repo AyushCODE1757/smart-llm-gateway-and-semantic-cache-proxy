@@ -72,6 +72,11 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 			"Cache HIT | Source: %s\n",
 			cacheResult.Source,
 		)
+		p.recordCacheHitMetric(
+			requestStart,
+			reqBody.Model,
+			cacheResult.Source,
+		)
 		if reqBody.Stream {
 			p.streamCachedResponse(
 				w,
@@ -85,6 +90,11 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 	}
 
 	fmt.Println("Cache MISS | Forwarding request to Ollama")
+	if reqBody.Stream {
+		reqBody.StreamOptions = &types.StreamOptions{
+			IncludeUsage: true,
+		}
+	}
 	payloadBytes, err := json.Marshal(reqBody)
 	if err != nil {
 		http.Error(
@@ -260,9 +270,11 @@ func (p *GateWayProxy) handleStreamingMiss(
 	var responseBuilder strings.Builder
 	var ttft time.Duration
 	var firstTokenReceived bool
+	var promptTokens int64
+	var completionTokens int64
+	var totalTokens int64
 	for scanner.Scan() {
 		line := scanner.Text()
-		fmt.Printf("RAW UPSTREAM LINE: %q\n", line)
 		if line == "" {
 			continue
 		}
@@ -286,6 +298,12 @@ func (p *GateWayProxy) handleStreamingMiss(
 
 				FinishReason *string `json:"finish_reason"`
 			} `json:"choices"`
+
+			Usage struct {
+				PromptTokens     int64 `json:"prompt_tokens"`
+				CompletionTokens int64 `json:"completion_tokens"`
+				TotalTokens      int64 `json:"total_tokens"`
+			} `json:"usage"`
 		}
 		if err := json.Unmarshal(
 			[]byte(line),
@@ -297,50 +315,57 @@ func (p *GateWayProxy) handleStreamingMiss(
 			)
 			continue
 		}
-		if len(ollamaChunk.Choices) == 0 {
-			continue
-		}
+		if len(ollamaChunk.Choices) > 0 {
 
-		content := ollamaChunk.Choices[0].Delta.Content
-		if content != "" {
-			if !firstTokenReceived {
-				ttft = time.Since(requestStart)
-				firstTokenReceived = true
-			}
-			responseBuilder.WriteString(content)
-			streamChunk := types.ChatCompletionStreamResponse{
-				ID:      "chatcmpl-stream",
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   model,
-				Choices: []types.ChatCompletionStreamChoice{
-					{
-						Index: 0,
-						Delta: types.ChatDelta{
-							Content: content,
+			content := ollamaChunk.Choices[0].Delta.Content
+			if content != "" {
+				if !firstTokenReceived {
+					ttft = time.Since(requestStart)
+					firstTokenReceived = true
+				}
+				responseBuilder.WriteString(content)
+				streamChunk := types.ChatCompletionStreamResponse{
+					ID:      "chatcmpl-stream",
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   model,
+					Choices: []types.ChatCompletionStreamChoice{
+						{
+							Index: 0,
+							Delta: types.ChatDelta{
+								Content: content,
+							},
 						},
 					},
-				},
-			}
-			if err := p.writeSSEChunk(w, rc, streamChunk); err != nil {
-				fmt.Printf(
-					"Failed to stream chunk to client: %v\n",
-					err,
-				)
-				return
+				}
+				if err := p.writeSSEChunk(w, rc, streamChunk); err != nil {
+					fmt.Printf(
+						"Failed to stream chunk to client: %v\n",
+						err,
+					)
+					return
+				}
+
 			}
 
 		}
-
+		if ollamaChunk.Usage.TotalTokens > 0 {
+			promptTokens = ollamaChunk.Usage.PromptTokens
+			completionTokens = ollamaChunk.Usage.CompletionTokens
+			totalTokens = ollamaChunk.Usage.TotalTokens
+		}
 	}
 	totalLatency := time.Since(requestStart)
 	event := telemetry.MetricEvent{
-		Model:        model,
-		CacheStatus:  "miss",
-		CacheSource:  "none",
-		TTFT:         ttft,
-		TotalLatency: totalLatency,
-		CreatedAt:    time.Now(),
+		Model:            model,
+		CacheStatus:      "miss",
+		CacheSource:      "none",
+		TTFT:             ttft,
+		TotalLatency:     totalLatency,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      totalTokens,
+		CreatedAt:        time.Now(),
 	}
 	p.Metrics.Publish(event)
 	if err := scanner.Err(); err != nil {
@@ -498,4 +523,19 @@ func (p *GateWayProxy) handleNonStreamingMiss(
 
 	}()
 
+}
+func (p *GateWayProxy) recordCacheHitMetric(
+	requestStartTime time.Time,
+	model string,
+	source string,
+) {
+	event := telemetry.MetricEvent{
+		Model:        model,
+		CacheStatus:  "hit",
+		CacheSource:  source,
+		TTFT:         0,
+		TotalLatency: time.Since(requestStartTime),
+		CreatedAt:    time.Now(),
+	}
+	p.Metrics.Publish(event)
 }

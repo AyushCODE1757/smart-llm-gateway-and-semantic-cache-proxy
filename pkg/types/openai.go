@@ -5,10 +5,11 @@ type ChatMessage struct {
 	Content string `json:"content"`
 }
 type ChatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      bool          `json:"stream,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []ChatMessage  `json:"messages"`
+	Stream        bool           `json:"stream,omitempty"`
+	Temperature   float64        `json:"temperature,omitempty"`
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 }
 
 type ChatCompletionResponse struct {
@@ -49,4 +50,7 @@ type ChatCompletionStreamChoice struct {
 type ChatDelta struct {
 	Role    string `json:"role,omitempty"`
 	Content string `json:"content,omitempty"`
+}
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }

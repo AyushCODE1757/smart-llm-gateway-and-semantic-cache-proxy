@@ -12,7 +12,7 @@ func StartMetricsWorker(
 	client *Client,
 	metrics *telemetry.MetricsChannel,
 	workerCount int,
-) {
+) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
@@ -41,4 +41,5 @@ func StartMetricsWorker(
 		}()
 
 	}
+	return &wg
 }

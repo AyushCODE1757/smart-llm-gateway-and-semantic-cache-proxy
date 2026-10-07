@@ -9,6 +9,9 @@ import (
 	"llm-gateway/pkg/telemetry"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -29,7 +32,12 @@ func main() {
 
 	log.Println("✅ ClickHouse connection successful")
 
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer cancel()
 	// 1. Redis Cache
 	redisCache := cache.NewRedisCache("localhost:6379", 30*time.Second)
 	defer redisCache.Close()
@@ -56,7 +64,7 @@ func main() {
 	metrics := telemetry.NewMetricsChannel(1000)
 
 	// 6. Start Async Worker
-	clickhouse.StartMetricsWorker(ctx, clickhouseClient, metrics, 3)
+	workerWG := clickhouse.StartMetricsWorker(ctx, clickhouseClient, metrics, 3)
 
 	// 7. Gateway Proxy
 	gatewayProxy := proxy.NewGateWayProxy("http://localhost:11434/v1/chat/completions", twoTierCache, metrics)
@@ -67,10 +75,35 @@ func main() {
 		gatewayProxy.HandleCompletions,
 	)
 
-	// 9. Start the Gateway
-	fmt.Println("LLM Gateway is listening on port 8080...")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
+	// 9. Initialize the server
+	server := http.Server{
+		Addr: ":8080",
 	}
+
+	go func() {
+		fmt.Println("LLM Gateway is listening on port 8080...")
+
+		if err := server.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
+			log.Fatalf("Server failed to start: %v", err)
+		}
+
+	}()
+
+	<-ctx.Done()
+	log.Println("Shutdown signal received")
+	shutdownCtx, shutdownCancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown failed: %v", err)
+	}
+	log.Println("Waiting for metrics workers to finish...")
+	workerWG.Wait()
+
+	log.Println("✅ LLM Gateway shutdown complete")
 
 }

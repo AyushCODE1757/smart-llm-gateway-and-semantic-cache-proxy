@@ -4,14 +4,31 @@ import (
 	"context"
 	"fmt"
 	"llm-gateway/pkg/cache"
+	"llm-gateway/pkg/clickhouse"
 	"llm-gateway/pkg/proxy"
 	"llm-gateway/pkg/telemetry"
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Println("Warning: .env file not found")
+	}
+	clickhouseClient, err := clickhouse.NewClient()
+	if err != nil {
+		log.Fatalf("ClickHouse client creation failed: %v", err)
+	}
+
+	if err := clickhouseClient.Ping(context.Background()); err != nil {
+		log.Fatalf("ClickHouse ping failed: %v", err)
+	}
+
+	log.Println("✅ ClickHouse connection successful")
+
 	ctx := context.Background()
 	// 1. Redis Cache
 	redisCache := cache.NewRedisCache("localhost:6379", 30*time.Second)

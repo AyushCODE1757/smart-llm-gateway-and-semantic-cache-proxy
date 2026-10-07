@@ -56,7 +56,7 @@ func main() {
 	metrics := telemetry.NewMetricsChannel(1000)
 
 	// 6. Start Async Worker
-	clickhouse.StartMetricsWorker(ctx, clickhouseClient, metrics)
+	clickhouse.StartMetricsWorker(ctx, clickhouseClient, metrics, 3)
 
 	// 7. Gateway Proxy
 	gatewayProxy := proxy.NewGateWayProxy("http://localhost:11434/v1/chat/completions", twoTierCache, metrics)

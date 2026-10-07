@@ -55,16 +55,19 @@ func main() {
 
 	metrics := telemetry.NewMetricsChannel(1000)
 
-	// 6. Gateway Proxy
+	// 6. Start Async Worker
+	clickhouse.StartMetricsWorker(ctx, clickhouseClient, metrics)
+
+	// 7. Gateway Proxy
 	gatewayProxy := proxy.NewGateWayProxy("http://localhost:11434/v1/chat/completions", twoTierCache, metrics)
 
-	// 6. Http Route
+	// 8. Http Route
 	http.HandleFunc(
 		"/v1/chat/completions",
 		gatewayProxy.HandleCompletions,
 	)
 
-	// 7. Start the Gateway
+	// 9. Start the Gateway
 	fmt.Println("LLM Gateway is listening on port 8080...")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatalf("Server failed to start: %v", err)

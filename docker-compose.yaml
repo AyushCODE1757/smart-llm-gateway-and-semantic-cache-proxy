@@ -25,20 +25,6 @@ services:
     environment:
       - REDIS_ARGS=--requirepass redis-pass1223 --appendonly yes
     restart: unless-stopped
-  clickhouse:
-    image: clickhouse/clickhouse-server:latest
-    container_name: clickhouse
-    restart: always
-    ports:
-      - "8123:8123" # HTTP interface
-      - "9000:9000" # Native gRPC/TCP client interface
-    volumes:
-      - ./clickhouse_data:/var/lib/clickhouse
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-
 volumes:
   redis-data:
     driver: local
@@ -47,5 +33,4 @@ configs:
   qdrant_config:
     content: |
       log_level: INFO
-
 

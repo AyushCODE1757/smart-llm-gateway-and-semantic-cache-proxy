@@ -6,6 +6,7 @@ import (
 	"llm-gateway/pkg/cache"
 	"llm-gateway/pkg/clickhouse"
 	"llm-gateway/pkg/proxy"
+	"llm-gateway/pkg/router"
 	"llm-gateway/pkg/telemetry"
 	"log"
 	"net/http"
@@ -21,6 +22,12 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: .env file not found")
 	}
+	llmRouter, err := router.NewRouter()
+	if err != nil {
+		log.Fatalf("Failed to initialize LLM router: %v", err)
+	}
+
+	log.Printf("LLM provider: %s", llmRouter.Provider)
 	clickhouseClient, err := clickhouse.NewClient()
 	if err != nil {
 		log.Fatalf("ClickHouse client creation failed: %v", err)
@@ -67,7 +74,7 @@ func main() {
 	workerWG := clickhouse.StartMetricsWorker(ctx, clickhouseClient, metrics, 3)
 
 	// 7. Gateway Proxy
-	gatewayProxy := proxy.NewGateWayProxy("http://localhost:11434/v1/chat/completions", twoTierCache, metrics)
+	gatewayProxy := proxy.NewGateWayProxy(llmRouter, twoTierCache, metrics)
 
 	// 8. Http Route
 	http.HandleFunc(

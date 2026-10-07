@@ -12,26 +12,27 @@ import (
 	"time"
 
 	"llm-gateway/pkg/cache"
+	"llm-gateway/pkg/router"
 	"llm-gateway/pkg/telemetry"
 	"llm-gateway/pkg/types"
 )
 
 // GateWayProxy holds config for our route.
 type GateWayProxy struct {
-	OllamaURL string
-	Cache     *cache.TwoTierCache
-	Metrics   *telemetry.MetricsChannel
+	Router  *router.Router
+	Cache   *cache.TwoTierCache
+	Metrics *telemetry.MetricsChannel
 }
 
 // NewGateWayProxy initializes the GateWayProxy.
 func NewGateWayProxy(
-	url string,
+	r *router.Router,
 	cache *cache.TwoTierCache,
 	metricChannel *telemetry.MetricsChannel) *GateWayProxy {
 	return &GateWayProxy{
-		OllamaURL: url,
-		Cache:     cache,
-		Metrics:   metricChannel,
+		Router:  r,
+		Cache:   cache,
+		Metrics: metricChannel,
 	}
 }
 
@@ -108,7 +109,7 @@ func (p *GateWayProxy) HandleCompletions(w http.ResponseWriter, r *http.Request)
 	upstreamReq, err := http.NewRequestWithContext(
 		r.Context(),
 		http.MethodPost,
-		p.OllamaURL,
+		p.Router.OllamaURL,
 		bytes.NewBuffer(payloadBytes),
 	)
 
